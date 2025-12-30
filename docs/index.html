@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Video Prompt Controller - Prompt Wizard</title>
+  <style>
+    :root { --bg:#0b0f17; --card:#121a26; --text:#e7eefc; --muted:#a7b4cc; --accent:#7aa2ff; --bad:#ff6b6b; --good:#4ade80; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif; background:var(--bg); color:var(--text); }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 18px; }
+    header { display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; margin-bottom: 14px; }
+    h1 { font-size: 18px; margin:0; }
+    .sub { color:var(--muted); font-size: 12px; }
+    .grid { display:grid; grid-template-columns: 1fr; gap: 14px; }
+    @media (min-width: 900px) { .grid { grid-template-columns: 360px 1fr; } }
+
+    .card { background:var(--card); border:1px solid rgba(255,255,255,.08); border-radius: 16px; padding: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.25); }
+    .steps { display:flex; gap:8px; flex-wrap:wrap; }
+    .pill { padding: 8px 10px; border-radius: 999px; border:1px solid rgba(255,255,255,.12); color:var(--muted); font-size: 12px; }
+    .pill.active { border-color: rgba(122,162,255,.7); color: var(--text); }
+    .pill.done { border-color: rgba(74,222,128,.6); color: var(--text); }
+    .row { display:grid; grid-template-columns: 1fr; gap: 10px; margin-top: 10px; }
+    @media (min-width: 520px) { .row.two { grid-template-columns: 1fr 1fr; } }
+    label { display:block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    input, select, textarea {
+      width:100%; padding: 10px 12px; border-radius: 12px;
+      background: rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.12);
+      color: var(--text); outline:none;
+    }
+    textarea { min-height: 110px; resize: vertical; }
+    input:focus, select:focus, textarea:focus { border-color: rgba(122,162,255,.7); }
+    .help { font-size: 12px; color: var(--muted); line-height: 1.5; }
+    .hr { height:1px; background: rgba(255,255,255,.10); margin: 12px 0; }
+    .btns { display:flex; gap:10px; flex-wrap:wrap; margin-top: 12px; }
+    button {
+      border:1px solid rgba(255,255,255,.14);
+      background: rgba(255,255,255,.06);
+      color: var(--text);
+      padding: 10px 12px;
+      border-radius: 12px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button.primary { background: rgba(122,162,255,.18); border-color: rgba(122,162,255,.55); }
+    button.danger { background: rgba(255,107,107,.14); border-color: rgba(255,107,107,.45); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .msg { padding: 10px 12px; border-radius: 12px; border:1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.04); font-size: 12px; }
+    .msg.bad { border-color: rgba(255,107,107,.45); background: rgba(255,107,107,.10); }
+    .msg.good { border-color: rgba(74,222,128,.45); background: rgba(74,222,128,.10); }
+    pre {
+      margin:0; padding: 12px; border-radius: 12px;
+      background: rgba(0,0,0,.35);
+      border:1px solid rgba(255,255,255,.10);
+      overflow:auto; font-size: 12px; line-height: 1.45;
+    }
+    .tiny { font-size: 11px; color: var(--muted); margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Grok 動画生成プロンプト ウィザード（3シーン固定・6秒）</h1>
+      <div class="sub">PC / スマホ対応・最小入力でJSON生成 → コピーして貼るだけ</div>
+    </header>
+
+    <div class="grid">
+      <!-- Left: Steps + Controls -->
+      <div class="card">
+        <div class="steps" id="stepPills"></div>
+        <div class="hr"></div>
+        <div class="help">
+          ・必須：mode / aspect / quality / visual_style / 3シーン(description, camera, seconds)<br>
+          ・制約：3シーンの秒数合計は<strong>6.0秒以下</strong><br>
+          ・生成：最終ステップでJSONをコピーしてGrokへ貼り付け
+        </div>
+        <div class="btns">
+          <button id="btnPrev">← 戻る</button>
+          <button class="primary" id="btnNext">次へ →</button>
+          <button class="danger" id="btnReset">リセット</button>
+        </div>
+        <div class="tiny" id="saveNote">入力はこの端末のブラウザに自動保存されます（localStorage）。</div>
+      </div>
+
+      <!-- Right: Step Content -->
+      <div class="card" id="content"></div>
+    </div>
+  </div>
+
+  <script>
+    const STORAGE_KEY = "vpc_prompt_wizard_v1";
+
+    const stateDefault = {
+      step: 0,
+      basic: { mode: "Normal", aspect_ratio: "9:16", quality: "High" },
+      style: { visual: "" },
+      scenes: [
+        { description: "", camera: "", seconds: 2.0 },
+        { description: "", camera: "", seconds: 2.0 },
+        { description: "", camera: "", seconds: 2.0 },
+      ],
+    };
+
+    const steps = [
+      { title: "1 基本" },
+      { title: "2 スタイル" },
+      { title: "3 シーン" },
+      { title: "4 生成" },
+    ];
+
+    let state = loadState();
+
+    const $ = (sel) => document.querySelector(sel);
+
+    function clamp(n, min, max) {
+      return Math.min(max, Math.max(min, n));
+    }
+
+    function loadState() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return structuredClone(stateDefault);
+        const parsed = JSON.parse(raw);
+        return mergeSafe(structuredClone(stateDefault), parsed);
+      } catch {
+        return structuredClone(stateDefault);
+      }
+    }
+
+    function saveState() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    }
+
+    function mergeSafe(base, incoming) {
+      // shallow/structured merge with guards
+      if (incoming && typeof incoming === "object") {
+        if (typeof incoming.step === "number") base.step = clamp(incoming.step, 0, steps.length - 1);
+        if (incoming.basic && typeof incoming.basic === "object") {
+          base.basic.mode = incoming.basic.mode ?? base.basic.mode;
+          base.basic.aspect_ratio = incoming.basic.aspect_ratio ?? base.basic.aspect_ratio;
+          base.basic.quality = incoming.basic.quality ?? base.basic.quality;
+        }
+        if (incoming.style && typeof incoming.style === "object") {
+          base.style.visual = incoming.style.visual ?? base.style.visual;
+        }
+        if (Array.isArray(incoming.scenes) && incoming.scenes.length === 3) {
+          base.scenes = incoming.scenes.map((s, i) => ({
+            description: (s?.description ?? base.scenes[i].description),
+            camera: (s?.camera ?? base.scenes[i].camera),
+            seconds: Number.isFinite(Number(s?.seconds)) ? Number(s.seconds) : base.scenes[i].seconds,
+          }));
+        }
+      }
+      return base;
+    }
+
+    function render() {
+      renderPills();
+      renderStep();
+      renderNav();
+      saveState();
+    }
+
+    function renderPills() {
+      const el = $("#stepPills");
+      el.innerHTML = "";
+      steps.forEach((s, i) => {
+        const pill = document.createElement("div");
+        pill.className = "pill" + (i === state.step ? " active" : "") + (i < state.step ? " done" : "");
+        pill.textContent = s.title;
+        pill.style.cursor = "pointer";
+        pill.onclick = () => { state.step = i; render(); };
+        el.appendChild(pill);
+      });
+    }
+
+    function renderNav() {
+      $("#btnPrev").disabled = state.step === 0;
+      $("#btnNext").textContent = state.step === steps.length - 1 ? "完了" : "次へ →";
+      // next enabled depends on validation
+      const v = validateStep(state.step);
+      $("#btnNext").disabled = !v.ok && state.step !== steps.length - 1;
+    }
+
+    function validateStep(stepIdx) {
+      // returns {ok:boolean, message?:string, kind?:'bad'|'good'}
+      if (stepIdx === 0) {
+        return { ok: true };
+      }
+      if (stepIdx === 1) {
+        const vis = state.style.visual.trim();
+        if (!vis) return { ok: false, message: "ビジュアルスタイル（visual_style）を入力してや。", kind: "bad" };
+        return { ok: true };
+      }
+      if (stepIdx === 2) {
+        const sum = state.scenes.reduce((a, s) => a + (Number(s.seconds) || 0), 0);
+        if (sum > 6.0 + 1e-9) return { ok: false, message: `秒数合計が6秒を超えとる（今 ${sum.toFixed(1)} 秒）。6秒以内にしてや。`, kind:"bad" };
+
+        for (let i = 0; i < 3; i++) {
+          const sc = state.scenes[i];
+          if (!sc.description.trim()) return { ok:false, message:`シーン${i+1}の説明（description）が空やで。`, kind:"bad" };
+          if (!sc.camera.trim()) return { ok:false, message:`シーン${i+1}のカメラ（camera）が空やで。`, kind:"bad" };
+          const sec = Number(sc.seconds);
+          if (!Number.isFinite(sec) || sec <= 0) return { ok:false, message:`シーン${i+1}の秒数が不正やで。`, kind:"bad" };
+        }
+        return { ok:true, message:`OKや。合計 ${sum.toFixed(1)} 秒（6秒以内）。`, kind:"good" };
+      }
+      if (stepIdx === 3) {
+        return { ok:true };
+      }
+      return { ok:true };
+    }
+
+    function renderStep() {
+      const c = $("#content");
+      const step = state.step;
+
+      if (step === 0) {
+        c.innerHTML = `
+          <h2 style="margin:0 0 6px;font-size:16px;">基本設定</h2>
+          <div class="row two">
+            <div>
+              <label>モード (mode)</label>
+              <select id="mode">
+                <option>Normal</option>
+                <option>Fun</option>
+                <option>Custom</option>
+                <option>Spicy</option>
+              </select>
+            </div>
+            <div>
+              <label>アスペクト比 (aspect_ratio)</label>
+              <select id="aspect">
+                <option>9:16</option>
+                <option>16:9</option>
+                <option>1:1</option>
+              </select>
+            </div>
+          </div>
+          <div class="row two">
+            <div>
+              <label>品質 (quality)</label>
+              <select id="quality">
+                <option>High</option>
+                <option>Medium</option>
+                <option>Low</option>
+              </select>
+            </div>
+            <div>
+              <label>動画長 (duration)</label>
+              <input value="6 seconds（固定）" disabled />
+            </div>
+          </div>
+          <div class="hr"></div>
+          <div class="help">ここは選択だけや。次で全体の見た目（visual_style）を入れるで。</div>
+        `;
+        $("#mode").value = state.basic.mode;
+        $("#aspect").value = state.basic.aspect_ratio;
+        $("#quality").value = state.basic.quality;
+
+        $("#mode").onchange = (e) => { state.basic.mode = e.target.value; renderNav(); saveState(); };
+        $("#aspect").onchange = (e) => { state.basic.aspect_ratio = e.target.value; renderNav(); saveState(); };
+        $("#quality").onchange = (e) => { state.basic.quality = e.target.value; renderNav(); saveState(); };
+        return;
+      }
+
+      if (step === 1) {
+        const v = validateStep(1);
+        c.innerHTML = `
+          <h2 style="margin:0 0 6px;font-size:16px;">全体スタイル（最低限）</h2>
+          <div class="row">
+            <div>
+              <label>ビジュアルスタイル (video_script.overall_style.visual)</label>
+              <textarea id="visual" placeholder="例: anime style, soft lighting, vibrant colors, cinematic"></textarea>
+              <div class="tiny">※最低限：ここだけ入力すればOK（音・テキストオーバーレイ無し）</div>
+            </div>
+          </div>
+          <div class="hr"></div>
+          ${v.ok ? "" : `<div class="msg bad">${escapeHtml(v.message)}</div>`}
+        `;
+        $("#visual").value = state.style.visual;
+        $("#visual").oninput = (e) => { state.style.visual = e.target.value; renderNav(); saveState(); };
+        return;
+      }
+
+      if (step === 2) {
+        const v = validateStep(2);
+        const sum = state.scenes.reduce((a, s) => a + (Number(s.seconds) || 0), 0);
+        c.innerHTML = `
+          <h2 style="margin:0 0 6px;font-size:16px;">シーン（3固定 / 秒数入力）</h2>
+          <div class="help">合計 <strong>6.0秒以内</strong>。今の合計：<strong>${sum.toFixed(1)}秒</strong></div>
+
+          ${[0,1,2].map(i => `
+            <div class="hr"></div>
+            <h3 style="margin:0 0 8px;font-size:14px;">シーン ${i+1}</h3>
+            <div class="row">
+              <div>
+                <label>説明 (description)</label>
+                <textarea id="desc${i}" placeholder="例: close-up of a chocolate bar melting..."></textarea>
+              </div>
+            </div>
+            <div class="row two">
+              <div>
+                <label>カメラ (camera)</label>
+                <input id="cam${i}" placeholder="例: close-up, slow pan, handheld" />
+              </div>
+              <div>
+                <label>秒数 (seconds) ※0.5刻み</label>
+                <input id="sec${i}" type="number" min="0.5" max="6" step="0.5" />
+              </div>
+            </div>
+          `).join("")}
+
+          <div class="hr"></div>
+          ${v.message ? `<div class="msg ${v.kind === "good" ? "good" : "bad"}">${escapeHtml(v.message)}</div>` : ""}
+          <div class="tiny">※ duration は "X seconds" 形式で自動生成されるで。</div>
+        `;
+
+        for (let i = 0; i < 3; i++) {
+          $("#desc"+i).value = state.scenes[i].description;
+          $("#cam"+i).value = state.scenes[i].camera;
+          $("#sec"+i).value = state.scenes[i].seconds;
+
+          $("#desc"+i).oninput = (e) => { state.scenes[i].description = e.target.value; renderNav(); saveState(); };
+          $("#cam"+i).oninput = (e) => { state.scenes[i].camera = e.target.value; renderNav(); saveState(); };
+          $("#sec"+i).oninput = (e) => {
+            const val = Number(e.target.value);
+            state.scenes[i].seconds = Number.isFinite(val) ? val : stateDefault.scenes[i].seconds;
+            render();
+          };
+        }
+        return;
+      }
+
+      if (step === 3) {
+        const json = buildPromptJson();
+        c.innerHTML = `
+          <h2 style="margin:0 0 6px;font-size:16px;">生成（JSON）</h2>
+          <div class="help">下のJSONをコピーして、そのままGrokに貼り付けたらええ。</div>
+          <div class="hr"></div>
+          <div class="btns">
+            <button class="primary" id="btnCopy">JSONをコピー</button>
+            <button id="btnDownload">JSONを保存（.json）</button>
+          </div>
+          <div class="hr"></div>
+          <pre id="jsonOut"></pre>
+          <div class="tiny">※ start_image_reference / audio / text_overlays は最低限構成のため出してへん。</div>
+          <div id="copyMsg" style="margin-top:10px;"></div>
+        `;
+
+        const pretty = JSON.stringify(json, null, 2);
+        $("#jsonOut").textContent = pretty;
+
+        $("#btnCopy").onclick = async () => {
+          try {
+            await navigator.clipboard.writeText(pretty);
+            $("#copyMsg").innerHTML = `<div class="msg good">コピー完了や。Grokに貼り付けて生成してや。</div>`;
+          } catch {
+            // Fallback
+            fallbackCopy(pretty);
+            $("#copyMsg").innerHTML = `<div class="msg good">コピー（フォールバック）完了や。Grokに貼り付けて生成してや。</div>`;
+          }
+        };
+
+        $("#btnDownload").onclick = () => {
+          const blob = new Blob([pretty], { type: "application/json" });
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = "grok_video_prompt.json";
+          a.click();
+          URL.revokeObjectURL(a.href);
+        };
+        return;
+      }
+    }
+
+    function buildPromptJson() {
+      return {
+        video_script: {
+          scenes: state.scenes.map(s => ({
+            description: s.description.trim(),
+            camera: s.camera.trim(),
+            duration: `${Number(s.seconds).toFixed(1).replace(/\.0$/, "")} seconds`
+          })),
+          overall_style: {
+            visual: state.style.visual.trim()
+          }
+        },
+        mode: state.basic.mode,
+        aspect_ratio: state.basic.aspect_ratio,
+        quality: state.basic.quality,
+        duration: "6 seconds"
+      };
+    }
+
+    function fallbackCopy(text) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    // Buttons
+    $("#btnPrev").onclick = () => {
+      state.step = clamp(state.step - 1, 0, steps.length - 1);
+      render();
+    };
+    $("#btnNext").onclick = () => {
+      if (state.step < steps.length - 1) {
+        const v = validateStep(state.step);
+        if (!v.ok) return;
+        state.step = clamp(state.step + 1, 0, steps.length - 1);
+        render();
+      }
+    };
+    $("#btnReset").onclick = () => {
+      state = structuredClone(stateDefault);
+      localStorage.removeItem(STORAGE_KEY);
+      render();
+    };
+
+    // Initial render
+    render();
+  </script>
+</body>
+</html>

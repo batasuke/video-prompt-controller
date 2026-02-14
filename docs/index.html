@@ -70,9 +70,9 @@
         <div class="steps" id="stepPills"></div>
         <div class="hr"></div>
         <div class="help">
-          ・必須：mode / aspect / quality / 全体スタイル（プリセット or カスタム） / シーン1（必須）<br>
-          ・任意：シーン2・シーン3（空なら未使用扱い）<br>
-          ・制約：使用中シーンの秒数合計は<strong>6.0秒以下</strong><br>
+          ・必須：mode / aspect / resolution / 全体スタイル（プリセット or カスタム） / シーン1（必須）<br>
+          ・任意：シーン2・シーン3・シーン4（空なら未使用扱い）<br>
+          ・制約：使用中シーンの秒数合計は<strong>10.0秒以下</strong><br>
           ・秒数：スマホ入力対策で<strong>0.5秒刻みの選択式</strong>
         </div>
         <div class="btns">
@@ -99,22 +99,35 @@
       { key: "custom", name: "カスタム（自分で入力）", value: "" },
     ];
     const presetMap = Object.fromEntries(STYLE_PRESETS.map(p => [p.key, p.value]));
+    // ===== Config (maintenance-friendly) =====
+    const MAX_SECONDS = 10;
+    const STEP_SECONDS = 0.5;
+
+    // 0.5秒刻みを小数で回すと誤差が出るので、内部はtick（整数）で管理する
+    // 0.5秒 = 1 tick、10秒 = 20 tick
+    const TICK_MS = Math.round(STEP_SECONDS * 1000); // 500
+    const MAX_TICKS = Math.round((MAX_SECONDS * 1000) / TICK_MS); // 20
+
+    const SCENE_COUNT = 4;
 
     const SECOND_OPTIONS = (() => {
-      const arr = [];
-      for (let s = 0.5; s <= 6.0 + 1e-9; s += 0.5) arr.push(Number(s.toFixed(1)));
+      const arr = [0.0]; // 0 = unused のため明示的に入れておく
+      for (let t = 1; t <= MAX_TICKS; t++) {
+        const seconds = (t * TICK_MS) / 1000; // 0.5, 1.0, 1.5 ... 10.0
+        arr.push(seconds);
+      }
       return arr;
     })();
 
     const stateDefault = {
       step: 0,
-      basic: { mode: "Normal", aspect_ratio: "9:16", quality: "High" },
+      basic: { mode: "Normal", aspect_ratio: "9:16", resolution: "720p" },
       style: { presetKey: "anime_bright", customText: "" },
-      scenes: [
-        { description: "", camera: "", seconds: 2.0 }, // scene1: required
-        { description: "", camera: "", seconds: 0.0 }, // scene2: optional (0 = unused)
-        { description: "", camera: "", seconds: 0.0 }, // scene3: optional (0 = unused)
-      ],
+      scenes: Array.from({ length: SCENE_COUNT }, (_, i) => ({
+        description: "",
+        camera: "",
+        seconds: i === 0 ? 2.0 : 0.0, // scene1 required, others optional (0 = unused)
+      })),
     };
 
     const steps = [
@@ -141,39 +154,45 @@
 
     function saveState() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
 
-    function mergeSafe(base, incoming) {
-      if (incoming && typeof incoming === "object") {
-        if (typeof incoming.step === "number") base.step = clamp(incoming.step, 0, steps.length - 1);
+function mergeSafe(base, incoming) {
+  if (incoming && typeof incoming === "object") {
+    if (typeof incoming.step === "number") base.step = clamp(incoming.step, 0, steps.length - 1);
 
-        if (incoming.basic && typeof incoming.basic === "object") {
-          base.basic.mode = incoming.basic.mode ?? base.basic.mode;
-          base.basic.aspect_ratio = incoming.basic.aspect_ratio ?? base.basic.aspect_ratio;
-          base.basic.quality = incoming.basic.quality ?? base.basic.quality;
-        }
-
-        if (incoming.style && typeof incoming.style === "object") {
-          const pk = incoming.style.presetKey ?? base.style.presetKey;
-          base.style.presetKey = presetMap[pk] !== undefined ? pk : base.style.presetKey;
-          base.style.customText = incoming.style.customText ?? base.style.customText;
-        }
-
-        if (Array.isArray(incoming.scenes) && incoming.scenes.length === 3) {
-          base.scenes = incoming.scenes.map((s, i) => ({
-            description: (s?.description ?? base.scenes[i].description),
-            camera: (s?.camera ?? base.scenes[i].camera),
-            seconds: Number.isFinite(Number(s?.seconds)) ? Number(s.seconds) : base.scenes[i].seconds,
-          }));
-        }
-      }
-      // guard: scene1 must have a positive default
-      if (!(Number(base.scenes[0].seconds) > 0)) base.scenes[0].seconds = 2.0;
-      // optional scenes: if invalid, set 0 (unused)
-      for (let i = 1; i <= 2; i++) {
-        const sec = Number(base.scenes[i].seconds);
-        if (!Number.isFinite(sec) || sec < 0) base.scenes[i].seconds = 0.0;
-      }
-      return base;
+    if (incoming.basic && typeof incoming.basic === "object") {
+      base.basic.mode = incoming.basic.mode ?? base.basic.mode;
+      base.basic.aspect_ratio = incoming.basic.aspect_ratio ?? base.basic.aspect_ratio;
+      base.basic.resolution = incoming.basic.resolution ?? base.basic.resolution;
     }
+
+    if (incoming.style && typeof incoming.style === "object") {
+      const pk = incoming.style.presetKey ?? base.style.presetKey;
+      base.style.presetKey = presetMap[pk] !== undefined ? pk : base.style.presetKey;
+      base.style.customText = incoming.style.customText ?? base.style.customText;
+    }
+
+    if (Array.isArray(incoming.scenes)) {
+      base.scenes = base.scenes.map((def, i) => {
+        const s = incoming.scenes[i];
+        return {
+          description: (s?.description ?? def.description),
+          camera: (s?.camera ?? def.camera),
+          seconds: Number.isFinite(Number(s?.seconds)) ? Number(s.seconds) : def.seconds,
+        };
+      });
+    }
+  }
+
+  // guard: scene1 must have a positive default
+  if (!(Number(base.scenes[0].seconds) > 0)) base.scenes[0].seconds = 2.0;
+
+  // optional scenes: if invalid, set 0 (unused)
+  for (let i = 1; i < base.scenes.length; i++) {
+    const sec = Number(base.scenes[i].seconds);
+    if (!Number.isFinite(sec) || sec < 0) base.scenes[i].seconds = 0.0;
+  }
+
+  return base;
+}
 
     function getFinalVisual() {
       const presetKey = state.style.presetKey;
@@ -193,16 +212,14 @@
       const sec = Number(sc.seconds) || 0;
       return Boolean(hasText) || sec > 0;
     }
-
     function usedScenes() {
       const out = [];
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < state.scenes.length; i++) {
         if (!isSceneUsed(i)) continue;
         out.push({ i, sc: state.scenes[i] });
       }
       return out;
     }
-
     function sumUsedSeconds() {
       return usedScenes().reduce((a, x) => a + (Number(x.sc.seconds) || 0), 0);
     }
@@ -242,10 +259,15 @@
         if (!visual) return { ok: false, message: "全体スタイルが空やで。プリセットを選ぶか、カスタムを入力してや。", kind: "bad" };
         return { ok: true, message: "OKや。", kind: "good" };
       }
-
       if (stepIdx === 2) {
         const sum = sumUsedSeconds();
-        if (sum > 6.0 + 1e-9) return { ok: false, message: `秒数合計が6秒を超えとる（今 ${sum.toFixed(1)} 秒）。6秒以内にしてや。`, kind:"bad" };
+        if (sum > MAX_SECONDS) {
+          return {
+            ok: false,
+            message: `秒数合計が${MAX_SECONDS.toFixed(1)}秒を超える（今${sum.toFixed(1)}秒）。${MAX_SECONDS.toFixed(1)}秒以内にしてや。`,
+            kind: "bad"
+          };
+        }
 
         // Scene1 required
         const s1 = state.scenes[0];
@@ -253,8 +275,8 @@
         if (!s1.camera.trim()) return { ok:false, message:"シーン1のカメラ（camera）が空やで。", kind:"bad" };
         if (!(Number(s1.seconds) > 0)) return { ok:false, message:"シーン1の秒数が不正やで。", kind:"bad" };
 
-        // Scene2/3 optional: if any text is entered or seconds > 0, require all fields + seconds > 0
-        for (let i = 1; i <= 2; i++) {
+        // Scene2+ optional: if any text is entered or seconds > 0, require all fields + seconds > 0
+        for (let i = 1; i < state.scenes.length; i++) {
           const sc = state.scenes[i];
           const hasDesc = sc.description.trim().length > 0;
           const hasCam = sc.camera.trim().length > 0;
@@ -269,9 +291,8 @@
         }
 
         const usedCount = usedScenes().length;
-        return { ok:true, message:`OKや。使用シーン ${usedCount} / 3、合計 ${sum.toFixed(1)} 秒（6秒以内）。`, kind:"good" };
+        return { ok:true, message:`OKや。使用シーン ${usedCount} / ${state.scenes.length}、合計 ${sum.toFixed(1)} 秒（${MAX_SECONDS.toFixed(1)}秒以内）。`, kind:"good" };
       }
-
       if (stepIdx === 3) return { ok:true };
       return { ok:true };
     }
@@ -313,16 +334,15 @@
           </div>
           <div class="row two">
             <div>
-              <label>品質 (quality)</label>
-              <select id="quality">
-                <option>High</option>
-                <option>Medium</option>
-                <option>Low</option>
-              </select>
-            </div>
+              <label>解像度 (resolution)</label>
+              <select id="resolution">
+              <option value="480p">480p</option>
+              <option value="720p">720p</option>
+            </select>
+          </div>
             <div>
               <label>動画長 (duration)</label>
-              <input value="6 seconds（固定）" disabled />
+              <input id="durationDisplay" disabled />
             </div>
           </div>
           <div class="hr"></div>
@@ -330,11 +350,10 @@
         `;
         $("#mode").value = state.basic.mode;
         $("#aspect").value = state.basic.aspect_ratio;
-        $("#quality").value = state.basic.quality;
-
+        $("#resolution").value = state.basic.resolution;
         $("#mode").onchange = (e) => { state.basic.mode = e.target.value; renderNav(); saveState(); };
         $("#aspect").onchange = (e) => { state.basic.aspect_ratio = e.target.value; renderNav(); saveState(); };
-        $("#quality").onchange = (e) => { state.basic.quality = e.target.value; renderNav(); saveState(); };
+        $("#resolution").onchange = (e) => { state.basic.resolution = e.target.value; renderNav(); saveState(); };
         return;
       }
 
@@ -402,68 +421,50 @@
         const usedCount = usedScenes().length;
 
         c.innerHTML = `
-          <h2 style="margin:0 0 6px;font-size:16px;">シーン（シーン1必須 / シーン2・3は任意）</h2>
+         
+          <h2 style="margin:0 0 6px;font-size:16px;">シーン（シーン1必須 / シーン2〜${SCENE_COUNT}は任意）</h2>
           <div class="help">
-            合計 <strong>6.0秒以内</strong>。今の合計：<strong>${sum.toFixed(1)}秒</strong>（使用シーン ${usedCount} / 3）<br>
-            ※ 秒数は <strong>0.5秒刻み</strong>で選べるで（スマホ対策）
+            合計 <strong>${MAX_SECONDS.toFixed(1)}秒以内</strong>。今の合計：<strong>${sum.toFixed(1)}秒</strong>（使用シーン ${usedCount} / ${SCENE_COUNT}）<br>
+            ※ 秒数は <strong>${STEP_SECONDS.toFixed(1)}秒刻み</strong>で選べるで（スマホ対策）
           </div>
+          ${state.scenes
+            .map((scene, i) => {
+              const n = i + 1;
+              const required = i === 0;
+              const title = required
+                ? `シーン ${n}（必須）`
+                : `シーン ${n}（任意 / 空なら未使用）`;
+              const placeholder = required
+                ? "例: close-up of a chocolate bar melting..."
+                : "未入力なら未使用扱い";
+              const camPlaceholder = required
+                ? "例: close-up, slow pan, handheld"
+                : "未入力なら未使用扱い";
 
-          <div class="hr"></div>
-          <h3 style="margin:0 0 8px;font-size:14px;">シーン 1（必須）</h3>
-          <div class="row">
-            <div>
-              <label>説明 (description)</label>
-              <textarea id="desc0" placeholder="例: close-up of a chocolate bar melting..."></textarea>
-            </div>
-          </div>
-          <div class="row two">
-            <div>
-              <label>カメラ (camera)</label>
-              <input id="cam0" placeholder="例: close-up, slow pan, handheld" />
-            </div>
-            <div>
-              <label>秒数 (seconds)</label>
-              ${renderSecondsSelect("sec0", state.scenes[0].seconds, false)}
-            </div>
-          </div>
+              return `
+                <div class="hr"></div>
+                <h3 style="margin:0 0 8px;font-size:14px;">${title}</h3>
 
-          <div class="hr"></div>
-          <h3 style="margin:0 0 8px;font-size:14px;">シーン 2（任意 / 空なら未使用）</h3>
-          <div class="row">
-            <div>
-              <label>説明 (description)</label>
-              <textarea id="desc1" placeholder="未入力なら未使用扱い"></textarea>
-            </div>
-          </div>
-          <div class="row two">
-            <div>
-              <label>カメラ (camera)</label>
-              <input id="cam1" placeholder="未入力なら未使用扱い" />
-            </div>
-            <div>
-              <label>秒数 (seconds)</label>
-              ${renderSecondsSelect("sec1", state.scenes[1].seconds, true)}
-            </div>
-          </div>
+                <div class="row">
+                  <div>
+                    <label>説明 (description)</label>
+                    <textarea id="desc${i}" placeholder="${placeholder}"></textarea>
+                  </div>
+                </div>
 
-          <div class="hr"></div>
-          <h3 style="margin:0 0 8px;font-size:14px;">シーン 3（任意 / 空なら未使用）</h3>
-          <div class="row">
-            <div>
-              <label>説明 (description)</label>
-              <textarea id="desc2" placeholder="未入力なら未使用扱い"></textarea>
-            </div>
-          </div>
-          <div class="row two">
-            <div>
-              <label>カメラ (camera)</label>
-              <input id="cam2" placeholder="未入力なら未使用扱い" />
-            </div>
-            <div>
-              <label>秒数 (seconds)</label>
-              ${renderSecondsSelect("sec2", state.scenes[2].seconds, true)}
-            </div>
-          </div>
+                <div class="row two">
+                  <div>
+                    <label>カメラ (camera)</label>
+                    <input id="cam${i}" placeholder="${camPlaceholder}" />
+                  </div>
+                  <div>
+                    <label>秒数 (seconds)</label>
+                    ${renderSecondsSelect("sec" + i, scene.seconds, !required)}
+                  </div>
+                </div>
+              `;
+            })
+            .join("")}
 
           <div class="hr"></div>
           ${v.message ? `<div class="msg ${v.kind === "good" ? "good" : "bad"}">${escapeHtml(v.message)}</div>` : ""}
@@ -474,7 +475,8 @@
         `;
 
         // bind fields
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < state.scenes.length; i++) {
+
           $("#desc"+i).value = state.scenes[i].description;
           $("#cam"+i).value = state.scenes[i].camera;
 
@@ -504,7 +506,7 @@
           </div>
           <div class="hr"></div>
           <pre id="jsonOut"></pre>
-          <div class="tiny">※ 未使用シーン（空のシーン2/3）はJSONに出さへん。</div>
+          <div class="tiny">※ 未使用シーン（空のシーン）はJSONに出さへん。</div>
           <div id="copyMsg" style="margin-top:10px;"></div>
         `;
 
@@ -531,20 +533,36 @@
         };
         return;
       }
+      updateDurationDisplay();
     }
+    function syncScenesFromUI() {
+      for (let i = 0; i < state.scenes.length; i++) {
+        const descEl = document.getElementById(`desc${i}`);
+        const camEl  = document.getElementById(`cam${i}`);
+        const secEl  = document.getElementById(`sec${i}`);
 
-    function fmtSeconds(sec) {
-      const s = Number(sec).toFixed(1).replace(/\.0$/, "");
-      return `${s} seconds`;
+        if (!descEl || !camEl || !secEl) continue; // そのstepでまだDOMが無い場合
+
+          state.scenes[i].description = descEl.value ?? "";
+          state.scenes[i].camera = camEl.value ?? "";
+          state.scenes[i].seconds = Number(secEl.value ?? 0);
+      }
     }
-
     function buildPromptJson() {
+      syncScenesFromUI(); // ← 追加（これが決め手）
       const visual = getFinalVisual();
-      const scenesOut = usedScenes().map(({ i, sc }) => ({
+
+      const used = usedScenes();
+
+      const scenesOut = used.map(({ i, sc }) => ({
         description: sc.description.trim(),
         camera: sc.camera.trim(),
         duration: fmtSeconds(sc.seconds)
       }));
+
+      // 合計秒数（最大10秒にクリップ）
+      const totalSecondsRaw = used.reduce((sum, { sc }) => sum + Number(sc.seconds || 0), 0);
+      const totalSeconds = Math.min(totalSecondsRaw, MAX_SECONDS);
 
       return {
         video_script: {
@@ -553,9 +571,24 @@
         },
         mode: state.basic.mode,
         aspect_ratio: state.basic.aspect_ratio,
-        quality: state.basic.quality,
-        duration: "6 seconds"
+        resolution: state.basic.resolution,
+        duration: fmtSeconds(totalSeconds)
       };
+    }
+
+    function fmtSeconds(sec) {
+      const s = Number(sec).toFixed(1).replace(/\.0$/, "");
+      return `${s} seconds`;
+    }
+    function updateDurationDisplay() {
+      const used = usedScenes();
+      const totalSecondsRaw = used.reduce((sum, { sc }) => sum + Number(sc.seconds || 0), 0);
+      const totalSeconds = Math.min(totalSecondsRaw, MAX_SECONDS);
+
+      const el = document.getElementById("durationDisplay");
+      if (el) {
+        el.value = fmtSeconds(totalSeconds);
+      }
     }
 
     function fallbackCopy(text) {
